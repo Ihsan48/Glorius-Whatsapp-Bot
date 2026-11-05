@@ -219,7 +219,7 @@ export async function startWhatsAppBot() {
     connectionState = 'CONNECTING';
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({
-      version: [2, 3000, 1015901307],
+      version: [2, 3000, 1043857760],
     }));
 
     sock = makeWASocket({
@@ -230,7 +230,7 @@ export async function startWhatsAppBot() {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      browser: Browsers.ubuntu('Glorius Bazaar Bot XI-G'),
+      browser: Browsers.windows('Desktop'),
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
       markOnlineOnConnect: true,
