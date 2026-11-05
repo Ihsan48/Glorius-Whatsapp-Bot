@@ -369,7 +369,7 @@ export function buildCouponCaption(ticket, webBaseUrl) {
     `🎫 *E-KUPON RESMI STAND BAZAR GLORIUS (XI-G)*\n` +
     `_Bulan Bahasa SMAN 2 Tanggul_\n\n` +
     `Halo *${customerName}* (${className})! 👋\n` +
-    `Terima kasih sudah memesan di Stand Bazar *GLORIUS (XI-G)*. Berikut adalah E-Kupon digital pesananmu:\n\n` +
+    `Terima kasih sudah memesan di Stand Bazar *GLORIUS (XI-G)*. Pesananmu telah terdaftar resmi di sistem kami. Berikut rincian E-Kupon digitalmu:\n\n` +
     `📌 *Kode Kupon:* #${code}\n` +
     `💳 *Status Bayar:* ${statusText}\n\n` +
     `🍴 *Rincian Pesanan:*\n` +
@@ -378,7 +378,16 @@ export function buildCouponCaption(ticket, webBaseUrl) {
     `💰 *Total Harga: ${formatIDR(totalPrice)}*\n\n` +
     `📥 *Unduh E-Kupon (JPG / PDF):*\n` +
     `${couponUrl}\n\n` +
-    `_Simpan gambar kupon di atas dan tunjukkan QR Code-nya ke meja kasir Stand XI-G saat pengambilan pesanan ya!_ ✨`
+    `📋 *PANDUAN PENGGUNAAN KUPON:*\n` +
+    `1. Simpan gambar E-Kupon di atas ke galeri foto HP kamu.\n` +
+    `2. Datang ke meja kasir Stand XI-G (Glorius) saat jam istirahat/bazar berlangsung.\n` +
+    `3. Tunjukkan gambar kupon ini agar *QR Code* di sisi kanan dapat di-scan oleh petugas stand.\n` +
+    `4. Setelah verifikasi berhasil, hidangan lezat pesananmu akan langsung diserahkan!\n\n` +
+    `⚠️ *PERINGATAN PENTING:*\n` +
+    `• *WAJIB MEMBAWA HANDPHONE (HP)* saat pengambilan pesanan untuk menunjukkan QR Code kupon digital ini.\n` +
+    `• Pastikan layar HP cukup terang saat di-scan oleh kasir stand.\n` +
+    `• Jika HP berhalangan dibawa ke sekolah, kamu bisa mencatat *Kode Kupon #${code}* atau mencetak kupon fisik (PDF/kertas).\n\n` +
+    `_Sampai jumpa di Stand XI-G! Jangan lupa bawa HP-mu ya!_ ✨🙌`
   );
 }
 
