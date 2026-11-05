@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: glorius-wa-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /ping
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
+      - key: WA_BOT_SECRET
+        value: GLORIUS_WA_BOT_SECRET_2026
+      - key: QR_SECRET_KEY
+        value: GLORIUS_XI_G_BULAN_BAHASA_2026_SMAN2TANGGUL
+      - key: PUBLIC_WEB_URL
+        value: https://bazaar-glorius.vercel.app

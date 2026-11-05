@@ -1,0 +1,24 @@
+{
+  "name": "glorius-wa-bot",
+  "version": "1.0.0",
+  "description": "Standalone 24/7 WhatsApp Bot Microservice & E-Kupon HD Generator untuk Stand Bazar Glorius (XI-G) SMAN 2 Tanggul",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test:coupon": "node src/test-coupon.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.65",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  }
+}
