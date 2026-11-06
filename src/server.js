@@ -8,6 +8,7 @@ import {
   resetWhatsAppSession,
   sendOrderCouponToWA,
   sendNotificationToWA,
+  checkWhatsAppPhoneWithProfile,
 } from './waEngine.js';
 import { renderCouponJpegBuffer } from './couponRenderer.js';
 
@@ -102,6 +103,33 @@ app.post('/api/reset-session', verifyBotSecret, async (_req, res) => {
     res.status(500).json({
       status: 'error',
       message: err?.message || 'Gagal mereset sesi.',
+    });
+  }
+});
+
+// ============================================================================
+// 2B. ENDPOINT VERIFIKASI AKUN WHATSAPP & PUSH NAME (/api/check-phone)
+// ============================================================================
+app.all('/api/check-phone', async (req, res) => {
+  try {
+    const rawPhone = req.body?.phone || req.query?.phone;
+    if (!rawPhone) {
+      return res.status(400).json({
+        status: 'error',
+        valid: false,
+        message: 'Parameter phone wajib disertakan.',
+      });
+    }
+    const result = await checkWhatsAppPhoneWithProfile(rawPhone);
+    return res.json({
+      status: 'success',
+      ...result,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      status: 'error',
+      valid: false,
+      message: err?.message || 'Gagal memverifikasi nomor telepon.',
     });
   }
 });

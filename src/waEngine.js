@@ -510,3 +510,76 @@ export async function sendNotificationToWA(payload) {
     message: `Notifikasi (${notifType}) berhasil dikirim ke ${target.phone}!`,
   };
 }
+
+
+/**
+ * Mengecek apakah suatu nomor terdaftar di WhatsApp dan mengambil display/push name publiknya jika ada
+ */
+export async function checkWhatsAppPhoneWithProfile(rawPhone) {
+  const target = formatPhoneToJid(rawPhone);
+  if (!target) {
+    return {
+      valid: false,
+      exists: false,
+      message: 'Format nomor telepon tidak valid (gunakan awalan 08 / 628).',
+    };
+  }
+
+  if (connectionState !== 'CONNECTED' || !sock) {
+    return {
+      valid: true,
+      exists: null,
+      phone: target.phone,
+      formattedPhone: target.phone.replace(/^62/, '0'),
+      pushName: null,
+      message: 'Bot WhatsApp belum terhubung ke server WhatsApp.',
+    };
+  }
+
+  try {
+    const results = await sock.onWhatsApp(target.jid);
+    const hit = Array.isArray(results) ? results.find((r) => r.exists) : null;
+
+    if (!hit) {
+      return {
+        valid: true,
+        exists: false,
+        phone: target.phone,
+        formattedPhone: target.phone.replace(/^62/, '0'),
+        pushName: null,
+        message: 'Nomor ini tidak memiliki akun WhatsApp aktif.',
+      };
+    }
+
+    let pushName = null;
+    try {
+      if (typeof sock.getBusinessProfile === 'function') {
+        const biz = await sock.getBusinessProfile(target.jid).catch(() => null);
+        if (biz?.description) pushName = biz.description;
+      }
+      if (!pushName && typeof sock.fetchStatus === 'function') {
+        const st = await sock.fetchStatus(target.jid).catch(() => null);
+        if (st?.status) pushName = st.status;
+      }
+    } catch {}
+
+    return {
+      valid: true,
+      exists: true,
+      phone: target.phone,
+      formattedPhone: target.phone.replace(/^62/, '0'),
+      jid: hit.jid || target.jid,
+      pushName: pushName || null,
+      message: 'Nomor terverifikasi aktif di WhatsApp!',
+    };
+  } catch (err) {
+    return {
+      valid: true,
+      exists: null,
+      phone: target.phone,
+      formattedPhone: target.phone.replace(/^62/, '0'),
+      pushName: null,
+      message: err?.message || 'Gagal mengecek nomor ke WhatsApp.',
+    };
+  }
+}
