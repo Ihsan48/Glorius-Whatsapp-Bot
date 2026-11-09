@@ -425,3 +425,56 @@ export function buildClaimedReceiptMessage(ticket) {
     `_Selamat menikmati hidangan dari Kelas XI-G (Glorius)!_ 🍽️🌿`
   );
 }
+
+export function buildOfficialReceiptMessage(receipt, webBaseUrl) {
+  const invoiceId = normalizeTicketCode(receipt.invoice_id || receipt.ticket_code || 'INV-000');
+  const customerName = String(receipt.customer_name || 'Pelanggan').trim();
+  const className = String(receipt.class_name || '').trim();
+  const cashierName = String(receipt.cashier_name || 'Kasir Stand Glorius').trim();
+  const totalPrice = Math.round(Number(receipt.total_amount || receipt.total_price || 0));
+  const paidAmount = Math.round(Number(receipt.paid_amount || totalPrice));
+  const changeAmount = Math.max(0, Number(receipt.change_amount || (paidAmount - totalPrice)));
+  const paymentMethod = String(receipt.payment_method || 'TUNAI').toUpperCase();
+  const paymentStatus = String(receipt.payment_status || 'LUNAS').toUpperCase();
+  const items = Array.isArray(receipt.items) ? receipt.items : [];
+
+  const nowWib = receipt.created_at || new Date().toLocaleString('id-ID', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Jakarta'
+  });
+
+  const itemLines = items.length > 0
+    ? items.map(i => `• ${i.qty}x ${i.name} (${formatIDR(Number(i.qty || 1) * Number(i.price || 0))})`).join('\n')
+    : '• Transaksi Menu Stand Bazar';
+
+  const baseUrl = String(
+    webBaseUrl || process.env.PUBLIC_WEB_URL || 'https://bazaar-glorius.vercel.app'
+  ).replace(/\/+$/, '');
+  const receiptUrl = `${baseUrl}/nota/${encodeURIComponent(invoiceId)}`;
+
+  return (
+    `🧾 *NOTA RESMI STAND BAZAR GLORIUS (XI-G)*\n` +
+    `_Bulan Bahasa SMAN 2 Tanggul_\n` +
+    `──────────────────────────\n` +
+    `No. Nota   : *#${invoiceId}*\n` +
+    `Waktu      : ${nowWib} WIB\n` +
+    `Kasir      : ${cashierName}\n` +
+    (customerName && customerName !== 'Pelanggan' ? `Pelanggan  : *${customerName}*${className ? ` (${className})` : ''}\n` : '') +
+    `──────────────────────────\n` +
+    `*RINCIAN TRANSAKSI:*\n` +
+    `${itemLines}\n` +
+    `──────────────────────────\n` +
+    `💰 *Total Belanja : ${formatIDR(totalPrice)}*\n` +
+    `💳 Metode Bayar  : ${paymentMethod}\n` +
+    (paymentMethod === 'TUNAI' || paymentMethod === 'CASH'
+      ? `💵 Diterima      : ${formatIDR(paidAmount)}\n` +
+        `🪙 Kembalian     : ${formatIDR(changeAmount)}\n`
+      : '') +
+    `📊 Status        : ✅ ${paymentStatus}\n` +
+    `──────────────────────────\n` +
+    `📥 *Buka Nota Digital & Cetak:*\n` +
+    `${receiptUrl}\n\n` +
+    `_Terima kasih telah berbelanja di Stand Bazar Glorius XI-G! Selamat menikmati hidangan kami._ ✨🙌`
+  );
+}

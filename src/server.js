@@ -8,6 +8,7 @@ import {
   resetWhatsAppSession,
   sendOrderCouponToWA,
   sendNotificationToWA,
+  sendReceiptToWA,
   checkWhatsAppPhoneWithProfile,
   setQueuePauseState,
   clearPendingQueue,
@@ -249,6 +250,44 @@ app.post('/api/send-notification', verifyBotSecret, async (req, res) => {
     return res.status(500).json({
       status: 'error',
       message: err?.message || 'Gagal mengirim notifikasi WhatsApp.',
+    });
+  }
+});
+
+// ============================================================================
+// 5B. ENDPOINT NOTA / STRUK TRANSAKSI RESMI (POST /api/send-receipt)
+// ============================================================================
+app.post('/api/send-receipt', verifyBotSecret, async (req, res) => {
+  try {
+    const receipt = req.body?.receipt || req.body;
+    if (!receipt) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Payload nota / transaksi tidak lengkap.',
+      });
+    }
+
+    const result = await sendReceiptToWA(receipt, {
+      phone: req.body?.phone || receipt.customer_phone || receipt.wa_number,
+      webBaseUrl: req.body?.web_base_url || process.env.PUBLIC_WEB_URL,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        status: 'error',
+        message: result.error || 'Gagal mengirim nota ke WhatsApp.',
+      });
+    }
+
+    return res.json({
+      status: 'success',
+      ...result,
+    });
+  } catch (err) {
+    console.error('[POST /api/send-receipt] Error:', err?.message);
+    return res.status(500).json({
+      status: 'error',
+      message: err?.message || 'Gagal mengirim nota WhatsApp.',
     });
   }
 });

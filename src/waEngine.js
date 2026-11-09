@@ -14,6 +14,7 @@ import {
   buildCouponCaption,
   buildBoothCallMessage,
   buildClaimedReceiptMessage,
+  buildOfficialReceiptMessage,
   normalizeTicketCode,
 } from './couponRenderer.js';
 
@@ -96,6 +97,11 @@ function loadQueueFromDisk() {
             pendingQueue.push({
               ...item,
               execute: () => internalSendNotification(item.payload),
+            });
+          } else if (item.action === 'RECEIPT' && item.receipt) {
+            pendingQueue.push({
+              ...item,
+              execute: () => internalSendReceipt(item.receipt, item.options),
             });
           }
         }
@@ -620,6 +626,39 @@ async function internalSendNotification(payload) {
 }
 
 /**
+ * Eksekusi pengiriman Nota Resmi murni
+ */
+async function internalSendReceipt(receipt, options = {}) {
+  const target = formatPhoneToJid(receipt?.customer_phone || receipt?.wa_number || options?.phone);
+  if (!target) return;
+  const invoiceId = normalizeTicketCode(receipt.invoice_id || receipt.ticket_code || 'INV-000');
+  const webBaseUrl = options.webBaseUrl || process.env.PUBLIC_WEB_URL;
+  const textMessage = buildOfficialReceiptMessage(receipt, webBaseUrl);
+
+  try {
+    await sock.sendPresenceUpdate('composing', target.jid);
+    await sleep(SAFE_CONFIG.COMPOSING_DELAY_MS);
+  } catch {}
+
+  await sock.sendMessage(target.jid, {
+    text: textMessage,
+  });
+
+  try {
+    await sock.sendPresenceUpdate('paused', target.jid);
+  } catch {}
+
+  pushLog({
+    type: 'RECEIPT_NOTA',
+    ticket_code: invoiceId,
+    customer_name: receipt.customer_name || 'Pelanggan',
+    phone: target.phone,
+    status: 'SENT',
+    detail: `Nota Resmi #${invoiceId} terkirim via WhatsApp`,
+  });
+}
+
+/**
  * Mengirim E-Kupon (Gambar HD 1344x630 + Caption Lengkap) ke Nomor WA Pembeli
  */
 export async function sendOrderCouponToWA(ticket, options = {}) {
@@ -755,6 +794,88 @@ export async function sendNotificationToWA(payload) {
       phone: target.phone,
       message: `Notifikasi (${notifType}) berhasil dikirim ke ${target.phone}!`,
     };
+  } finally {
+    isProcessingQueue = false;
+    if (pendingQueue.length > 0) {
+      triggerQueueProcessing();
+    }
+  }
+}
+
+/**
+ * Mengirim Nota / Kwitansi Resmi ke Nomor WA Pembeli
+ */
+export async function sendReceiptToWA(receipt, options = {}) {
+  const target = formatPhoneToJid(receipt?.customer_phone || receipt?.wa_number || options?.phone);
+  if (!target) {
+    return {
+      success: false,
+      queued: false,
+      error: 'Nomor WhatsApp pembeli kosong atau tidak valid.',
+    };
+  }
+
+  const invoiceId = normalizeTicketCode(receipt.invoice_id || receipt.ticket_code || 'INV-000');
+
+  if (connectionState !== 'CONNECTED' || !sock || isProcessingQueue || pendingQueue.length > 0) {
+    pendingQueue.push({
+      action: 'RECEIPT',
+      receipt,
+      options,
+      execute: () => internalSendReceipt(receipt, options),
+      type: 'RECEIPT_NOTA',
+      ticketCode: invoiceId,
+      customerName: receipt.customer_name || 'Pelanggan',
+      phone: target.phone,
+      createdAt: Date.now(),
+    });
+    saveQueueToDisk();
+
+    pushLog({
+      type: 'RECEIPT_NOTA',
+      ticket_code: invoiceId,
+      customer_name: receipt.customer_name || 'Pelanggan',
+      phone: target.phone,
+      status: 'QUEUED',
+      detail: connectionState === 'CONNECTED'
+        ? `Diantrekan aman (Pacing anti-spam, antrean: #${pendingQueue.length})`
+        : 'Diantrekan (menunggu koneksi WA aktif)',
+    });
+
+    if (connectionState === 'CONNECTED' && !isProcessingQueue && !isQueuePaused) {
+      triggerQueueProcessing();
+    }
+
+    return {
+      success: true,
+      queued: true,
+      phone: target.phone,
+      queueLength: pendingQueue.length,
+      message: connectionState === 'CONNECTED'
+        ? `Nota #${invoiceId} masuk antrean pengiriman aman (urutan #${pendingQueue.length}).`
+        : 'Bot sedang menyambung ulang, Nota dimasukkan ke antrean otomatis.',
+    };
+  }
+
+  try {
+    isProcessingQueue = true;
+    await internalSendReceipt(receipt, options);
+    return {
+      success: true,
+      queued: false,
+      phone: target.phone,
+      message: `Nota Resmi #${invoiceId} berhasil dikirim ke WhatsApp ${target.phone}!`,
+    };
+  } catch (err) {
+    pushLog({
+      type: 'RECEIPT_NOTA',
+      ticket_code: invoiceId,
+      customer_name: receipt.customer_name || 'Pelanggan',
+      phone: target.phone,
+      status: 'FAILED',
+      detail: err?.message || 'Gagal mengirim nota',
+    });
+    throw err;
   } finally {
     isProcessingQueue = false;
     if (pendingQueue.length > 0) {
