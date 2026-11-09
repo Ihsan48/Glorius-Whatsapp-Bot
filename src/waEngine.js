@@ -18,7 +18,9 @@ import {
 } from './couponRenderer.js';
 
 const logger = pino({ level: 'silent' });
-const AUTH_DIR = path.resolve(process.env.WA_AUTH_DIR || './auth_info_baileys');
+const DATA_DIR = path.resolve(process.env.WA_DATA_DIR || './data');
+const AUTH_DIR = path.resolve(process.env.WA_AUTH_DIR || path.join(DATA_DIR, 'auth_info_baileys'));
+const QUEUE_FILE = path.resolve(path.join(DATA_DIR, 'pending_queue.json'));
 
 let sock = null;
 let connectionState = 'DISCONNECTED'; // 'DISCONNECTED' | 'CONNECTING' | 'WAITING_QR' | 'CONNECTED'
@@ -32,7 +34,7 @@ const startedAt = Date.now();
 
 // Riwayat pengiriman pesan (maksimal 100 entri terakhir di memori)
 const messageLogs = [];
-// Antrean pengiriman jika bot sedang reconnect sesaat atau sedang pacing
+// Antrean pengiriman persisten di disk
 const pendingQueue = [];
 let isProcessingQueue = false;
 let isQueuePaused = false;
@@ -45,6 +47,68 @@ const SAFE_CONFIG = {
   COMPOSING_DELAY_MS: 1800, // Waktu simulasi "sedang mengetik" (1.8 detik)
   MAX_QUEUE_TTL_MS: 4 * 60 * 60 * 1000, // Batas usia pesan dalam antrean: 4 jam (cegah blast pesan basi)
 };
+
+function ensureDataDirectories() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(AUTH_DIR)) {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+  }
+}
+
+function saveQueueToDisk() {
+  try {
+    ensureDataDirectories();
+    const serializableQueue = pendingQueue.map((item) => ({
+      id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      action: item.action || 'COUPON',
+      ticket: item.ticket || null,
+      payload: item.payload || null,
+      options: item.options || {},
+      type: item.type || 'COUPON_IMAGE',
+      ticketCode: item.ticketCode || item.ticket?.ticket_code || '-',
+      customerName: item.customerName || item.ticket?.customer_name || 'Pelanggan',
+      phone: item.phone || '-',
+      createdAt: item.createdAt || Date.now(),
+    }));
+    fs.writeFileSync(QUEUE_FILE, JSON.stringify(serializableQueue, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[WA-Bot] Gagal menyimpan antrean ke disk:', err?.message);
+  }
+}
+
+function loadQueueFromDisk() {
+  try {
+    if (fs.existsSync(QUEUE_FILE)) {
+      const raw = fs.readFileSync(QUEUE_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        console.log(`📦 [WA-Bot] Memuat ${parsed.length} antrean tersimpan dari disk (${QUEUE_FILE})...`);
+        for (const item of parsed) {
+          // Buat closure eksekusi ulang dari data tiket yang tersimpan
+          if (item.action === 'COUPON' && item.ticket) {
+            pendingQueue.push({
+              ...item,
+              execute: () => internalSendCoupon(item.ticket, item.options),
+            });
+          } else if (item.action === 'NOTIF' && item.payload) {
+            pendingQueue.push({
+              ...item,
+              execute: () => internalSendNotification(item.payload),
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[WA-Bot] Gagal membaca antrean dari disk:', err?.message);
+  }
+}
+
+// Inisialisasi awal direktori dan muat antrean tersimpan saat boot
+ensureDataDirectories();
+loadQueueFromDisk();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -118,6 +182,7 @@ export function setQueuePauseState(paused) {
 export function clearPendingQueue() {
   const clearedCount = pendingQueue.length;
   pendingQueue.length = 0;
+  saveQueueToDisk();
   return { clearedCount };
 }
 
@@ -135,6 +200,7 @@ export async function triggerQueueProcessing() {
   try {
     while (pendingQueue.length > 0 && connectionState === 'CONNECTED' && !isQueuePaused) {
       const job = pendingQueue.shift();
+      saveQueueToDisk();
       if (!job) break;
 
       // Filter pesan yang sudah kedaluwarsa (> 4 jam) agar tidak membuat kaget siswa
@@ -166,6 +232,7 @@ export async function triggerQueueProcessing() {
     }
   } finally {
     isProcessingQueue = false;
+    saveQueueToDisk();
   }
 }
 
@@ -461,6 +528,98 @@ export async function resetWhatsAppSession() {
 }
 
 /**
+ * Eksekusi pengiriman E-Kupon murni
+ */
+async function internalSendCoupon(ticket, options = {}) {
+  const target = formatPhoneToJid(ticket?.wa_number || options?.phone);
+  if (!target) return;
+  const code = normalizeTicketCode(ticket.ticket_code || 'GLR-000');
+  const webBaseUrl = options.webBaseUrl || process.env.PUBLIC_WEB_URL;
+
+  try {
+    await sock.sendPresenceUpdate('composing', target.jid);
+    await sleep(SAFE_CONFIG.COMPOSING_DELAY_MS);
+  } catch {}
+
+  const jpgBuffer = await renderCouponJpegBuffer(ticket);
+  const caption = buildCouponCaption(ticket, webBaseUrl);
+
+  await sock.sendMessage(target.jid, {
+    image: jpgBuffer,
+    caption,
+    mimetype: 'image/jpeg',
+  });
+
+  try {
+    await sock.sendPresenceUpdate('paused', target.jid);
+  } catch {}
+
+  pushLog({
+    type: 'COUPON_IMAGE',
+    ticket_code: code,
+    customer_name: ticket.customer_name || 'Pelanggan',
+    phone: target.phone,
+    status: 'SENT',
+    detail: `E-Kupon HD (${Math.round(jpgBuffer.byteLength / 1024)} KB) terkirim`,
+  });
+}
+
+/**
+ * Eksekusi pengiriman Notifikasi murni
+ */
+async function internalSendNotification(payload) {
+  const target = formatPhoneToJid(payload?.wa_number || payload?.phone);
+  if (!target) return;
+  const notifType = String(payload.type || 'CALL_BOOTH').toUpperCase();
+  const ticket = payload.ticket || payload;
+  const code = normalizeTicketCode(ticket.ticket_code || 'GLR-000');
+  const includeCouponImage = Boolean(payload.include_image);
+
+  let textMessage = String(payload.custom_message || '').trim();
+  if (!textMessage) {
+    if (notifType === 'CLAIMED') {
+      textMessage = buildClaimedReceiptMessage(ticket);
+    } else {
+      textMessage = buildBoothCallMessage(ticket, payload.webBaseUrl);
+    }
+  }
+
+  try {
+    await sock.sendPresenceUpdate('composing', target.jid);
+    await sleep(1500);
+  } catch {}
+
+  if (includeCouponImage) {
+    const jpgBuffer = await renderCouponJpegBuffer(ticket);
+    await sock.sendMessage(target.jid, {
+      image: jpgBuffer,
+      caption: textMessage,
+      mimetype: 'image/jpeg',
+    });
+  } else {
+    await sock.sendMessage(target.jid, {
+      text: textMessage,
+    });
+  }
+
+  try {
+    await sock.sendPresenceUpdate('paused', target.jid);
+  } catch {}
+
+  pushLog({
+    type: notifType,
+    ticket_code: code,
+    customer_name: ticket.customer_name || 'Pelanggan',
+    phone: target.phone,
+    status: 'SENT',
+    detail:
+      notifType === 'CLAIMED'
+        ? 'Notifikasi bukti klaim terkirim'
+        : 'Panggilan ambil pesanan di stand terkirim',
+  });
+}
+
+/**
  * Mengirim E-Kupon (Gambar HD 1344x630 + Caption Lengkap) ke Nomor WA Pembeli
  */
 export async function sendOrderCouponToWA(ticket, options = {}) {
@@ -474,48 +633,21 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
   }
 
   const code = normalizeTicketCode(ticket.ticket_code || 'GLR-000');
-  const webBaseUrl = options.webBaseUrl || process.env.PUBLIC_WEB_URL;
-
-  const executeSend = async () => {
-    // 1. Simulasi Kehadiran Manusia: "sedang mengetik / mengunggah media"
-    try {
-      await sock.sendPresenceUpdate('composing', target.jid);
-      await sleep(SAFE_CONFIG.COMPOSING_DELAY_MS);
-    } catch {}
-
-    const jpgBuffer = await renderCouponJpegBuffer(ticket);
-    const caption = buildCouponCaption(ticket, webBaseUrl);
-
-    await sock.sendMessage(target.jid, {
-      image: jpgBuffer,
-      caption,
-      mimetype: 'image/jpeg',
-    });
-
-    try {
-      await sock.sendPresenceUpdate('paused', target.jid);
-    } catch {}
-
-    pushLog({
-      type: 'COUPON_IMAGE',
-      ticket_code: code,
-      customer_name: ticket.customer_name || 'Pelanggan',
-      phone: target.phone,
-      status: 'SENT',
-      detail: `E-Kupon HD (${Math.round(jpgBuffer.byteLength / 1024)} KB) terkirim`,
-    });
-  };
 
   // Jika bot sedang disconnect ATAU antrean sedang aktif berjalan, masukkan ke antrean teratur
   if (connectionState !== 'CONNECTED' || !sock || isProcessingQueue || pendingQueue.length > 0) {
     pendingQueue.push({
-      execute: executeSend,
+      action: 'COUPON',
+      ticket,
+      options,
+      execute: () => internalSendCoupon(ticket, options),
       type: 'COUPON_IMAGE',
       ticketCode: code,
       customerName: ticket.customer_name || 'Pelanggan',
       phone: target.phone,
       createdAt: Date.now(),
     });
+    saveQueueToDisk();
 
     pushLog({
       type: 'COUPON_IMAGE',
@@ -528,7 +660,6 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
         : 'Diantrekan (menunggu koneksi WA aktif)',
     });
 
-    // Jika bot sedang connected tapi antrean belum berjalan, picu pemrosesan
     if (connectionState === 'CONNECTED' && !isProcessingQueue && !isQueuePaused) {
       triggerQueueProcessing();
     }
@@ -546,7 +677,7 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
 
   try {
     isProcessingQueue = true;
-    await executeSend();
+    await internalSendCoupon(ticket, options);
     return {
       success: true,
       queued: false,
@@ -586,63 +717,19 @@ export async function sendNotificationToWA(payload) {
   const notifType = String(payload.type || 'CALL_BOOTH').toUpperCase();
   const ticket = payload.ticket || payload;
   const code = normalizeTicketCode(ticket.ticket_code || 'GLR-000');
-  const includeCouponImage = Boolean(payload.include_image);
-
-  const executeNotif = async () => {
-    let textMessage = String(payload.custom_message || '').trim();
-    if (!textMessage) {
-      if (notifType === 'CLAIMED') {
-        textMessage = buildClaimedReceiptMessage(ticket);
-      } else {
-        textMessage = buildBoothCallMessage(ticket, payload.webBaseUrl);
-      }
-    }
-
-    // 1. Simulasi Kehadiran Manusia: "sedang mengetik"
-    try {
-      await sock.sendPresenceUpdate('composing', target.jid);
-      await sleep(1500);
-    } catch {}
-
-    if (includeCouponImage) {
-      const jpgBuffer = await renderCouponJpegBuffer(ticket);
-      await sock.sendMessage(target.jid, {
-        image: jpgBuffer,
-        caption: textMessage,
-        mimetype: 'image/jpeg',
-      });
-    } else {
-      await sock.sendMessage(target.jid, {
-        text: textMessage,
-      });
-    }
-
-    try {
-      await sock.sendPresenceUpdate('paused', target.jid);
-    } catch {}
-
-    pushLog({
-      type: notifType,
-      ticket_code: code,
-      customer_name: ticket.customer_name || 'Pelanggan',
-      phone: target.phone,
-      status: 'SENT',
-      detail:
-        notifType === 'CLAIMED'
-          ? 'Notifikasi bukti klaim terkirim'
-          : 'Panggilan ambil pesanan di stand terkirim',
-    });
-  };
 
   if (connectionState !== 'CONNECTED' || !sock || isProcessingQueue || pendingQueue.length > 0) {
     pendingQueue.push({
-      execute: executeNotif,
+      action: 'NOTIF',
+      payload,
+      execute: () => internalSendNotification(payload),
       type: notifType,
       ticketCode: code,
       customerName: ticket.customer_name || 'Pelanggan',
       phone: target.phone,
       createdAt: Date.now(),
     });
+    saveQueueToDisk();
 
     if (connectionState === 'CONNECTED' && !isProcessingQueue && !isQueuePaused) {
       triggerQueueProcessing();
@@ -661,7 +748,7 @@ export async function sendNotificationToWA(payload) {
 
   try {
     isProcessingQueue = true;
-    await executeNotif();
+    await internalSendNotification(payload);
     return {
       success: true,
       queued: false,

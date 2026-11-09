@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Buat folder sesi WhatsApp dengan izin tulis penuh (kompatibel HuggingFace Spaces UID 1000)
-RUN mkdir -p /app/auth_info_baileys && chmod -R 777 /app
+# Buat folder data persisten untuk sesi WA dan antrean (dengan izin tulis penuh)
+RUN mkdir -p /app/data /app/data/auth_info_baileys && chmod -R 777 /app
 
 COPY package*.json ./
 RUN npm install --omit=dev --no-audit --no-fund
@@ -19,9 +19,10 @@ RUN npm install --omit=dev --no-audit --no-fund
 COPY . .
 RUN chmod -R 777 /app
 
-# Port 7860 adalah port standar Hugging Face Spaces (Gratis 24 Jam 16GB RAM)
-# Juga mendukung Render / Railway / Koyeb via variabel PORT
+# Port standar service
 ENV PORT=7860
+ENV WA_DATA_DIR=/app/data
+ENV WA_AUTH_DIR=/app/data/auth_info_baileys
 EXPOSE 7860
 
 CMD ["node", "src/server.js"]
