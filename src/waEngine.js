@@ -32,8 +32,27 @@ const startedAt = Date.now();
 
 // Riwayat pengiriman pesan (maksimal 100 entri terakhir di memori)
 const messageLogs = [];
-// Antrean pengiriman jika bot sedang reconnect sesaat
+// Antrean pengiriman jika bot sedang reconnect sesaat atau sedang pacing
 const pendingQueue = [];
+let isProcessingQueue = false;
+let isQueuePaused = false;
+let heartbeatInterval = null;
+
+// Konfigurasi Keamanan Anti-Spam (Human-Like Pacing)
+const SAFE_CONFIG = {
+  MIN_DELAY_MS: 4000,       // Jeda minimal antar pesan (4 detik)
+  MAX_DELAY_MS: 7500,       // Jeda maksimal antar pesan (7.5 detik)
+  COMPOSING_DELAY_MS: 1800, // Waktu simulasi "sedang mengetik" (1.8 detik)
+  MAX_QUEUE_TTL_MS: 4 * 60 * 60 * 1000, // Batas usia pesan dalam antrean: 4 jam (cegah blast pesan basi)
+};
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRandomDelay(min = SAFE_CONFIG.MIN_DELAY_MS, max = SAFE_CONFIG.MAX_DELAY_MS) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 function pushLog(entry) {
   const item = {
@@ -81,22 +100,72 @@ export function getBotState() {
     pairingCode: latestPairingCode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     queueLength: pendingQueue.length,
+    isProcessingQueue,
+    isQueuePaused,
+    safeMode: true,
     logs: messageLogs.slice(0, 40),
   };
 }
 
-async function flushPendingQueue() {
-  if (connectionState !== 'CONNECTED' || !sock || pendingQueue.length === 0) return;
-  console.log(`[WA-Bot] Memproses ${pendingQueue.length} antrean pesan tertunda...`);
+export function setQueuePauseState(paused) {
+  isQueuePaused = Boolean(paused);
+  if (!isQueuePaused && connectionState === 'CONNECTED') {
+    triggerQueueProcessing();
+  }
+  return { isQueuePaused, queueLength: pendingQueue.length };
+}
 
-  while (pendingQueue.length > 0 && connectionState === 'CONNECTED') {
-    const job = pendingQueue.shift();
-    if (!job) break;
-    try {
-      await job.execute();
-    } catch (err) {
-      console.error('[WA-Bot] Gagal memproses antrean:', err?.message);
+export function clearPendingQueue() {
+  const clearedCount = pendingQueue.length;
+  pendingQueue.length = 0;
+  return { clearedCount };
+}
+
+/**
+ * Pemroses antrean adaptif dengan Pacing & Human Presence (Anti-Ban)
+ */
+export async function triggerQueueProcessing() {
+  if (isProcessingQueue) return;
+  if (isQueuePaused) return;
+  if (connectionState !== 'CONNECTED' || !sock) return;
+
+  isProcessingQueue = true;
+  console.log(`[WA-Bot] Memulai pemrosesan aman antrean (${pendingQueue.length} item tersisa)...`);
+
+  try {
+    while (pendingQueue.length > 0 && connectionState === 'CONNECTED' && !isQueuePaused) {
+      const job = pendingQueue.shift();
+      if (!job) break;
+
+      // Filter pesan yang sudah kedaluwarsa (> 4 jam) agar tidak membuat kaget siswa
+      if (job.createdAt && Date.now() - job.createdAt > SAFE_CONFIG.MAX_QUEUE_TTL_MS) {
+        console.warn(`[WA-Bot] Mengabaikan pesan kadaluarsa tiket ${job.ticketCode || '-'}`);
+        pushLog({
+          type: job.type || 'EXPIRED_MESSAGE',
+          ticket_code: job.ticketCode || '-',
+          customer_name: job.customerName || 'Pelanggan',
+          phone: job.phone || '-',
+          status: 'SKIPPED',
+          detail: 'Dilewati: Antrean kadaluarsa (> 4 jam) untuk mencegah spam',
+        });
+        continue;
+      }
+
+      try {
+        await job.execute();
+      } catch (err) {
+        console.error(`[WA-Bot] Gagal mengeksekusi pesan ${job.ticketCode || ''}:`, err?.message);
+      }
+
+      // Berikan jeda acak manusiawi (4–7.5 detik) jika masih ada antrean berikutnya
+      if (pendingQueue.length > 0 && connectionState === 'CONNECTED' && !isQueuePaused) {
+        const delay = getRandomDelay();
+        console.log(`⏳ [Anti-Ban Pacing] Menunggu jeda aman ${Math.round(delay / 1000)}s sebelum pesan berikutnya...`);
+        await sleep(delay);
+      }
     }
+  } finally {
+    isProcessingQueue = false;
   }
 }
 
@@ -234,9 +303,11 @@ export async function startWhatsAppBot() {
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
       markOnlineOnConnect: true,
-      keepAliveIntervalMs: 25000,
+      keepAliveIntervalMs: 15000,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
+      retryRequestDelayMs: 2000,
+      maxMsgRetryCount: 3,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -266,10 +337,35 @@ export async function startWhatsAppBot() {
           name: sock?.user?.name || 'Stand Bazar Glorius XI-G',
         };
         console.log(`✅ [WA-Bot] TERHUBUNG KE WHATSAPP sebagai: ${connectedUser.id}`);
-        flushPendingQueue();
+
+        // Set status online di WhatsApp
+        try {
+          await sock.sendPresenceUpdate('available');
+        } catch {}
+
+        // Mulai background proactive heartbeat (ping socket setiap 45 detik)
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(async () => {
+          if (connectionState === 'CONNECTED' && sock) {
+            try {
+              // Simulasi keep-alive ringan tanpa membebani chat
+              await sock.sendPresenceUpdate('available');
+            } catch (err) {
+              console.warn('[WA-Bot] Heartbeat warning:', err?.message);
+            }
+          }
+        }, 45000);
+
+        // Jalankan antrean dengan pacing aman anti-ban
+        triggerQueueProcessing();
       }
 
       if (connection === 'close') {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+
         const statusCode =
           lastDisconnect?.error?.output?.statusCode ||
           lastDisconnect?.error?.statusCode;
@@ -381,6 +477,12 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
   const webBaseUrl = options.webBaseUrl || process.env.PUBLIC_WEB_URL;
 
   const executeSend = async () => {
+    // 1. Simulasi Kehadiran Manusia: "sedang mengetik / mengunggah media"
+    try {
+      await sock.sendPresenceUpdate('composing', target.jid);
+      await sleep(SAFE_CONFIG.COMPOSING_DELAY_MS);
+    } catch {}
+
     const jpgBuffer = await renderCouponJpegBuffer(ticket);
     const caption = buildCouponCaption(ticket, webBaseUrl);
 
@@ -389,6 +491,10 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
       caption,
       mimetype: 'image/jpeg',
     });
+
+    try {
+      await sock.sendPresenceUpdate('paused', target.jid);
+    } catch {}
 
     pushLog({
       type: 'COUPON_IMAGE',
@@ -400,25 +506,46 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
     });
   };
 
-  if (connectionState !== 'CONNECTED' || !sock) {
-    pendingQueue.push({ execute: executeSend });
+  // Jika bot sedang disconnect ATAU antrean sedang aktif berjalan, masukkan ke antrean teratur
+  if (connectionState !== 'CONNECTED' || !sock || isProcessingQueue || pendingQueue.length > 0) {
+    pendingQueue.push({
+      execute: executeSend,
+      type: 'COUPON_IMAGE',
+      ticketCode: code,
+      customerName: ticket.customer_name || 'Pelanggan',
+      phone: target.phone,
+      createdAt: Date.now(),
+    });
+
     pushLog({
       type: 'COUPON_IMAGE',
       ticket_code: code,
       customer_name: ticket.customer_name || 'Pelanggan',
       phone: target.phone,
       status: 'QUEUED',
-      detail: 'Dimasukkan ke antrean (menunggu koneksi WA aktif)',
+      detail: connectionState === 'CONNECTED'
+        ? `Diantrekan aman (Pacing anti-spam, antrean: #${pendingQueue.length})`
+        : 'Diantrekan (menunggu koneksi WA aktif)',
     });
+
+    // Jika bot sedang connected tapi antrean belum berjalan, picu pemrosesan
+    if (connectionState === 'CONNECTED' && !isProcessingQueue && !isQueuePaused) {
+      triggerQueueProcessing();
+    }
+
     return {
       success: true,
       queued: true,
       phone: target.phone,
-      message: 'Bot sedang menyambung ulang, E-Kupon dimasukkan ke antrean otomatis.',
+      queueLength: pendingQueue.length,
+      message: connectionState === 'CONNECTED'
+        ? `Pesanan masuk antrean pengiriman aman anti-spam (urutan #${pendingQueue.length}).`
+        : 'Bot sedang menyambung ulang, E-Kupon dimasukkan ke antrean otomatis.',
     };
   }
 
   try {
+    isProcessingQueue = true;
     await executeSend();
     return {
       success: true,
@@ -436,6 +563,11 @@ export async function sendOrderCouponToWA(ticket, options = {}) {
       detail: err?.message || 'Gagal mengirim pesan',
     });
     throw err;
+  } finally {
+    isProcessingQueue = false;
+    if (pendingQueue.length > 0) {
+      triggerQueueProcessing();
+    }
   }
 }
 
@@ -466,6 +598,12 @@ export async function sendNotificationToWA(payload) {
       }
     }
 
+    // 1. Simulasi Kehadiran Manusia: "sedang mengetik"
+    try {
+      await sock.sendPresenceUpdate('composing', target.jid);
+      await sleep(1500);
+    } catch {}
+
     if (includeCouponImage) {
       const jpgBuffer = await renderCouponJpegBuffer(ticket);
       await sock.sendMessage(target.jid, {
@@ -478,6 +616,10 @@ export async function sendNotificationToWA(payload) {
         text: textMessage,
       });
     }
+
+    try {
+      await sock.sendPresenceUpdate('paused', target.jid);
+    } catch {}
 
     pushLog({
       type: notifType,
@@ -492,23 +634,46 @@ export async function sendNotificationToWA(payload) {
     });
   };
 
-  if (connectionState !== 'CONNECTED' || !sock) {
-    pendingQueue.push({ execute: executeNotif });
+  if (connectionState !== 'CONNECTED' || !sock || isProcessingQueue || pendingQueue.length > 0) {
+    pendingQueue.push({
+      execute: executeNotif,
+      type: notifType,
+      ticketCode: code,
+      customerName: ticket.customer_name || 'Pelanggan',
+      phone: target.phone,
+      createdAt: Date.now(),
+    });
+
+    if (connectionState === 'CONNECTED' && !isProcessingQueue && !isQueuePaused) {
+      triggerQueueProcessing();
+    }
+
     return {
       success: true,
       queued: true,
       phone: target.phone,
-      message: 'Notifikasi masuk antrean pengiriman otomatis.',
+      queueLength: pendingQueue.length,
+      message: connectionState === 'CONNECTED'
+        ? `Notifikasi masuk antrean aman (urutan #${pendingQueue.length}).`
+        : 'Notifikasi masuk antrean pengiriman otomatis.',
     };
   }
 
-  await executeNotif();
-  return {
-    success: true,
-    queued: false,
-    phone: target.phone,
-    message: `Notifikasi (${notifType}) berhasil dikirim ke ${target.phone}!`,
-  };
+  try {
+    isProcessingQueue = true;
+    await executeNotif();
+    return {
+      success: true,
+      queued: false,
+      phone: target.phone,
+      message: `Notifikasi (${notifType}) berhasil dikirim ke ${target.phone}!`,
+    };
+  } finally {
+    isProcessingQueue = false;
+    if (pendingQueue.length > 0) {
+      triggerQueueProcessing();
+    }
+  }
 }
 
 

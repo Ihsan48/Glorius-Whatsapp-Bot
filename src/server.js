@@ -9,6 +9,8 @@ import {
   sendOrderCouponToWA,
   sendNotificationToWA,
   checkWhatsAppPhoneWithProfile,
+  setQueuePauseState,
+  clearPendingQueue,
 } from './waEngine.js';
 import { renderCouponJpegBuffer } from './couponRenderer.js';
 
@@ -105,6 +107,28 @@ app.post('/api/reset-session', verifyBotSecret, async (_req, res) => {
       message: err?.message || 'Gagal mereset sesi.',
     });
   }
+});
+
+// ============================================================================
+// 2A. ENDPOINT KONTROL ANTREAN AMAN (PAUSE / RESUME / CLEAR QUEUE)
+// ============================================================================
+app.post('/api/queue/pause', verifyBotSecret, (req, res) => {
+  const paused = req.body?.paused !== false;
+  const result = setQueuePauseState(paused);
+  res.json({
+    status: 'success',
+    message: paused ? 'Antrean pesan dijeda sementara.' : 'Antrean pesan dilanjutkan.',
+    ...result,
+  });
+});
+
+app.post('/api/queue/clear', verifyBotSecret, (_req, res) => {
+  const result = clearPendingQueue();
+  res.json({
+    status: 'success',
+    message: `Berhasil membersihkan ${result.clearedCount} antrean pesan.`,
+    ...result,
+  });
 });
 
 // ============================================================================
@@ -497,12 +521,22 @@ app.get('/', (_req, res) => {
       </div>
     </div>
 
-    <!-- Log Pengiriman -->
+    <!-- Log Pengiriman & Kontrol Antrean Aman -->
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px;">
         <div>
-          <h2>3. Riwayat Pengiriman Pesan Otomatis (Live Logs)</h2>
-          <div class="sub" style="margin-bottom: 0;">Endpoint Keep-Alive 24 Jam: <code>GET /ping</code> &bull; Endpoint Webhook: <code>POST /api/send-coupon</code></div>
+          <h2>3. Antrean Pesan & Riwayat Pengiriman (Anti-Ban Protected)</h2>
+          <div class="sub" style="margin-bottom: 0;">
+            Pacing Human-Like: Jeda aman 4.0–7.5 detik per pesan &bull; Endpoint Keep-Alive: <code>GET /ping</code>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" class="btn-soft" id="btn-pause-queue" onclick="togglePauseQueue()" style="padding: 7px 14px; font-size: 0.78rem;">
+            ⏸️ Jeda Antrean
+          </button>
+          <button type="button" class="btn-danger" onclick="clearQueue()" style="padding: 7px 14px; font-size: 0.78rem;">
+            🗑️ Bersihkan Antrean (<span id="queue-count">0</span>)
+          </button>
         </div>
       </div>
       <div style="overflow-x: auto;">
@@ -539,11 +573,21 @@ app.get('/', (_req, res) => {
         const mins = Math.floor((data.uptimeSeconds || 0) / 60);
         upLabel.textContent = 'Uptime Server: ' + mins + ' menit (' + (data.uptimeSeconds || 0) + ' dtk)';
 
+        const qCount = document.getElementById('queue-count');
+        if (qCount) qCount.textContent = data.queueLength || '0';
+
+        const pauseBtn = document.getElementById('btn-pause-queue');
+        if (pauseBtn) {
+          pauseBtn.textContent = data.isQueuePaused ? '▶️ Lanjutkan Antrean' : '⏸️ Jeda Antrean';
+          pauseBtn.style.background = data.isQueuePaused ? 'var(--amber-soft)' : 'var(--bg)';
+          pauseBtn.style.color = data.isQueuePaused ? 'var(--amber)' : 'var(--teak)';
+        }
+
         if (data.connected) {
           dot.className = 'dot online';
-          text.textContent = 'TERHUBUNG KE WHATSAPP (AKTIF 24/7)';
+          text.textContent = 'TERHUBUNG KE WHATSAPP (ANTI-BAN PROTECTED)';
           info.textContent = 'Nomor Bot Aktif: ' + (data.user?.id || 'Terhubung') + ' (' + (data.user?.name || 'Stand Glorius') + ')';
-          qrBox.innerHTML = '<div style="color: var(--forest); font-weight: 800; font-size: 1.05rem;">✅ WhatsApp Bot Sudah Terhubung!</div><div style="font-size: 0.82rem; color: var(--muted); margin-top: 6px;">Bot siap mengirim E-Kupon otomatis setiap ada pesanan masuk di Web Utama.</div>';
+          qrBox.innerHTML = '<div style="color: var(--forest); font-weight: 800; font-size: 1.05rem;">✅ WhatsApp Bot Sudah Terhubung!</div><div style="font-size: 0.82rem; color: var(--muted); margin-top: 6px;">Dilengkapi Pacing Human-Like & Auto Heartbeat untuk mencegah pemblokiran.</div>';
         } else if (data.status === 'WAITING_QR' && data.qrDataUrl) {
           dot.className = 'dot';
           text.textContent = 'MENUNGGU SCAN QR / PAIRING';
@@ -605,6 +649,28 @@ app.get('/', (_req, res) => {
         headers: { 'Content-Type': 'application/json', 'x-bot-secret': secret }
       });
       setTimeout(pollStatus, 1000);
+    }
+
+    async function togglePauseQueue() {
+      const secret = document.getElementById('bot-secret').value.trim();
+      const currentText = document.getElementById('btn-pause-queue').textContent;
+      const willPause = !currentText.includes('Lanjutkan');
+      await fetch('/api/queue/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-bot-secret': secret },
+        body: JSON.stringify({ paused: willPause })
+      });
+      pollStatus();
+    }
+
+    async function clearQueue() {
+      if (!confirm('Hapus semua antrean pesan yang belum terkirim?')) return;
+      const secret = document.getElementById('bot-secret').value.trim();
+      await fetch('/api/queue/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-bot-secret': secret }
+      });
+      pollStatus();
     }
 
     async function sendTestCoupon() {
